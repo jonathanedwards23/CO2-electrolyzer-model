@@ -1,0 +1,319 @@
+Model Electrolyzer
+
+//Component Definitions
+
+    Parameter Comp Uses StringParameter
+      Valid As StringSet;
+    End
+
+    //Mapping of H2O, CO2, O2 (component names must match those in property list)
+    CompH2O as Comp (Description:"Component name for water");
+    CompH2O.Valid: ComponentList;
+    CompH2O: "H2O";
+
+    CompCO2 as Comp (Description:"Component name for carbon dioxide");
+    CompCO2.Valid: ComponentList;
+    CompCO2: "CO2";
+
+    CompO2 as Comp (Description:"Component name for oxygen");
+    CompO2.Valid: ComponentList;
+    CompO2: "O2";
+
+    //Mapping of gas products (component names must match those in property list)
+    CompH2 as Comp (Description:"Component name for hydrogen");
+    CompH2.Valid: ComponentList;
+    CompH2: "H2";
+
+    CompCO as Comp (Description:"Component name for carbon monoxide");
+    CompCO.Valid: ComponentList;
+    CompCO: "CO";
+
+    CompC2H4 as Comp (Description:"Component name for ethylene");
+    CompC2H4.Valid: ComponentList;
+    CompC2H4: "ETHYL-01";
+
+    GasProd as StringSet ([CompH2, CompCO, CompC2H4]);
+
+    //Mapping of liquid products 
+    CompFormate as Comp (Description:"Component name for formic acid (formate)");
+    CompFormate.Valid: ComponentList;
+    CompFormate: "FORMI-01";
+
+    CompAcetate as Comp (Description:"Component name for acetic acid (acetate)");
+    CompAcetate.Valid: ComponentList;
+    CompAcetate: "ACETI-01";
+
+    CompEthanol as Comp (Description:"Component name for ethanol");
+    CompEthanol.Valid: ComponentList;
+    CompEthanol: "ETHAN-01";
+
+    CompPropanol as Comp (Description:"Component name for propanol");
+    CompPropanol.Valid: ComponentList;
+    CompPropanol: "1-PRO-01";
+    
+    LiqProd as StringSet ([CompFormate, CompAcetate, CompEthanol, CompPropanol]);
+
+//Port definitions
+    cathode_in as input MoleFractionPort(Description:"Cathode inlet stream");
+    anode_in as input MoleFractionPort(Description:"Anode inlet stream");
+    cathode_out as output MoleFractionPort(Description:"Cathode outlet stream");
+    anode_out as output MoleFractionPort(Description:"Anode outlet stream");
+
+//Fixed Variable Declaration
+
+    T as temperature (description:"Stack temperature (K)", value:anode_in.T, spec:Fixed);
+    P_cathode as pressure (description:"Cathode pressure", value:cathode_in.P, spec:Fixed);
+    P_anode as pressure (description:"Anode pressure", value:anode_in.P, spec:Fixed);
+    Faraday as constant (description: "Faraday's Constant", value:96485, spec:Fixed);
+    R as constant (description: "Universal Gas Constant", value:8.314, spec:Fixed);
+    V_cell as elec_pot (description:"Cell voltage", value:-4.0, spec: Fixed);
+    humidity as coefficient (description:"Relative humidity of cathode and anode gas outlet streams", value: 1, spec: Fixed);
+    
+    //Fixed Reactor Geometry (Assumes Rectangular Channel Cross-section)
+    A_geometric as area (description:"Active Area (m2)", value:5E-4, spec:Fixed);
+    wc as length (description:"Width of flow field (m)", value:8E-4, spec:Fixed);
+    ec as length (description:"Depth of flow field (m)", value: 8E-4, spec:Fixed);
+    Sherwood as positive (description:"Sherwood Number", value:2.98, spec:Fixed);                       //Assumes rectangular cross-section with 1:1 aspect ration (laminar flow)
+    theta_channel as positive (description:"Effective Mass Transfer Factor", value:0.50, spec:Fixed);   //Assumes half the active area is channel area
+
+    //Electrode properties
+    epsilon_e as fraction (description:"Porosity of the cathode electrode structure", value: 0.78, spec:Fixed);
+    thick_e as length (description:"Thickness of the cathode electrode structure", value: 200E-6, spec:Fixed);
+    
+    //Electrokinetic variables and half-cell reaction stoichiometry
+    j_exchange(GasProd+LiqProd) as current_density (description:"Pre Exp Kinetic Coef", value:0, spec: Fixed);
+    j_exchange_OER as current_density (description:"Anode pre exp kinetic coef", value:1E-3, spec: Fixed);
+    alpha(GasProd+LiqProd) as coefficient (description:"Transfer coef.", value:0.025, spec:Fixed);
+    alpha_OER as coefficient (description:"Transfer coef. anode", value:0.5, spec:Fixed);
+    a(GasProd+LiqProd) as coefficient (description:"mol CO2 per mol product", spec:Fixed);
+    b(GasProd+LiqProd) as coefficient (description:"mol e- per mol product", spec:Fixed);
+    c(GasProd+LiqProd) as coefficient (description:"mol H2O per mol product (basic cond.)", spec: Fixed);
+    CCO2_ref as conc_mole (description:"CO2 reference concentration", value: 0.001, spec: Fixed);
+
+    //Empirical carbonate formation variables
+    carb1 as positive (description:"Current y-int", value: 7.87, spec: Fixed);
+    carb2 as negative (description:"Current slope", value: -0.0110, spec: Fixed);
+
+    //Liquid and water product crossover coefficients, fraction of liquid products in anode stream
+    theta_water as coefficient (description:"Fraction of required cathodic water which crosses over the membrane", value:1.5, spec:Fixed);
+    theta_liquid(LiqProd) as ratio_ (description:"Fraction of liquid products in anode compartment", value:0.9, spec:Fixed);
+    
+    //Cell and membrane resistances    
+    ohmic1 as positive (description:"Ohmic resistance pre-exponential constant", value: 17.5, spec:Fixed);
+    ohmic2 as negative (description:"Ohmic resistance exponential factor", value:-0.198, spec:Fixed);
+    V_nernstian as elec_pot (description:"Nernstian voltage drop arising from cathode-anode pH difference", value: -0.510, spec:Fixed);
+
+    //Define 2d array with zeroes everywhere except on the diagonal (e.g. the same substance twice) for thermodynamic value lookup
+    pure(ComponentList, ComponentList) as molefraction (description:"Used for composition of pure substance");
+    for tempx in ComponentList do
+      pure(tempx, tempx): 1, fixed;
+      for tempy in (ComponentList - tempx) do
+        pure(tempx, tempy):0, fixed;
+        endfor
+      endfor    
+
+//Free Variable Declaration
+
+    //Electrokinetic variables
+    E_cathode as elec_pot (description:"Cathode potential (V vs. RHE)", value:-0.5, spec:Free);
+    E_anode as elec_pot (description:"Anode Potential (V vs. RHE)", value: 1.5, spec:Free);
+    eta_c(GasProd+LiqProd) as voltage (description:"Product-specific overpotential (V)", value:0.30, spec: Free);
+    eta_OER as voltage(description:"Anode overpotential (V)", value:0.30, spec: Free);
+    E_td(GasProd+LiqProd) as elec_pot (description:"Thermodynamic half-cell voltage", spec:Free);
+    E_td_OER as elec_pot (description:"Thermodynamic voltage, OER", spec: Free);
+    E_tn(GasProd+LiqProd) as elec_pot (description:"Product-specific thermoneutral full cell voltage", spec:Free);
+    E_tn_cell as elec_pot (description:"Thermoneutral full cell voltage", spec:Free);
+    j_partial(GasProd+LiqProd) as current_density (description:"Partial current density (mA cm-2)", value:150/size(GasProd+LiqProd), spec:Free);
+    j_total as current_density (description:"Current density (mA cm-2)", value: 150, spec:Free);
+    FE(GasProd+LiqProd) as percent (description:"Faradaic efficiency", value:1/size(GasProd+LiqProd), spec:Free);
+    Q_cell as power (description:"Heat rejected from cell (kW)", spec:Free);
+    Electricity as power (description:"Electrical input for cell (kW)", spec:Free);
+    
+    //Mass transfer variables
+    Lc as length(description: "Characteristic Length", spec:Free);
+    CCO2_bulk as conc_mole (description:"Average CO2 concentration in Bulk", lower: 0, value: 0.040, spec:Free);
+    CCO2_surf as conc_mole (description:"CO2 Concentration on Surface", lower: 0, value: 0.020, spec:Free);
+    kNet as velocity (description:"Net mass transfer coefficient", lower: 0, value: 4E-2, spec:Free);
+    kS as velocity (description:"Serpentine channel mass transfer coefficient", lower:0, value: 4E-2, spec:Free);
+    kE as velocity (description:"Electrode mass transfer coefficient", lower:0, value:4E-2, spec:Free);
+    DiffusiFeed(ComponentList) as diffusivity (description:"Feed Diffusivity", spec:Free);
+    z_cat_av(ComponentList) as molefraction (description:"Average cathode vapour phase mole fraction", value:1/size(ComponentList), spec:Free);
+    dens_av as dens_mol_vap (description:"Average cathode molar vapour density", spec:Free);
+  
+    //CO2 and H2O flows
+    tau_CO2 as positive (description:"CO2 crossover coefficient(umol C-1)", lower:0, upper:10.4, value:5.2, spec:Free);
+    CO2_crossover as flux_mol (description:"CO2 lost to anode (kmol m-2 s-1)", lower:0, value:1E-9, spec:Free);
+    CO2_converted as flux_mol (description:"CO2 electrochemically converted (kmol m-2 s-1)", lower:0, value:1E-9, spec:Free);
+    H2O_consumed as flux_mol (description:"H2O consumed at the cathode (kmol m-2 s-1)", lower:0, value:1E-9, spec:Free);
+    H2O_crossover as flux_mol (description:"H2O crossover from cathode to anode (kmol m-2 s-1)", lower:0, value: 1E-9, spec:Free);
+    H2O_produced as flux_mol (description:"H2O produced at the anode (kmol m-2 s-1)", lower:0, value:1E-9, spec:Free);
+    P_vapour(ComponentList) as pressure (description:"Vapour pressures", value:1/size(ComponentList), spec:Free);
+
+    //Fluid stream variables
+    dens_2 as dens_mol_vap (description:"Outoing cathode molar vapour density", spec:Free);
+    dens_3 as dens_mol_liq (description:"Outoging cathode molar liquid density", spec:Free);
+    dens_5 as dens_mol_vap (description:"Outgoing anode molar vapour density", spec:Free);
+    dens_6 as dens_mol_liq (description:"Outoging anode molar liquid density", spec:Free);
+    z_2(ComponentList) as molefraction (description:"Composition of outgoing cathode vapour stream", value: 1/size(ComponentList), spec:Free);
+    z_3(ComponentList) as molefraction (description:"Composition of outgoing cathode liquid stream", value: 1/size(ComponentList), spec:Free);
+    z_5(ComponentList) as molefraction (description:"Composition of outgoing anode vapour stream", value:1/size(ComponentList), spec:Free);
+    z_6(ComponentList) as molefraction (description:"Composition of outgoing anode liquid stream", value:1/size(ComponentList), spec:Free);
+    N_2(ComponentList) as flux_mol (description:"Outgoing cathode gas stream molar flux", lower:0, value:cathode_in.F/(3600*A_geometric*size(ComponentList)), spec:Free);
+    N_3(ComponentList) as flux_mol (description:"Outgoing cathode liquid stream molar flux", lower:0, value:cathode_in.F/(3600*A_geometric*size(ComponentList)), spec:Free);
+    N_5(ComponentList) as flux_mol (description:"Outgoing anode gas molar flux", lower:0, value:cathode_in.F/(3600*A_geometric*size(ComponentList)), spec:Free);
+    N_6(ComponentList) as flux_mol (description:"Outgoing anode liquid molar flux", lower:0, value:anode_in.F/(3600*A_geometric*size(ComponentList)), spec:Free);
+    Flux_2 as flux_mol (description:"Total gas molar flux leaving cathode", value:cathode_in.F/(3600*A_geometric), spec:Free);
+    Flux_3 as flux_mol (description:"Total liquid molar flux leaving cathode", value:cathode_in.F/(3600*A_geometric), spec:Free);
+    Flux_5 as flux_mol (description:"Total gas molar flux leaving anode", value:anode_in.F/(3600*A_geometric), spec: Free);
+    Flux_6 as flux_mol (description:"Total liquid molar flux leaving anode", value:anode_in.F/(3600*A_geometric), spec: Free);
+
+    //Cell resistances
+    V_ohmic as elec_pot (description:"Ohmic voltage drop inside stack", value:-0.5, spec:Free);
+    V_membrane as elec_pot (description:"Voltage drop across membrane", value:-0.5, spec:Free);
+
+    //Thermodynamic variables
+    gInterest(GasProd + LiqProd + CompCO2 + CompO2 + CompH2O) as gibbs_mol (description:"Molar gibbs (GJ kmol-1)", spec:Free);
+    hInterest(GasProd + LiqProd + CompCO2 + CompO2 + CompH2O) as enth_mol (description:"Molar enthalpy (GJ kmol-1)", spec:Free);
+    h_2 as enth_mol (description:"Molar enthalpy of cathode vapour stream", spec:Free);
+    h_3 as enth_mol (description:"Molar enthalpy of cathode liquid stream", spec:Free);
+    h_5 as enth_mol (description:"Molar enthalpy of anode vapour stream", spec:Free);
+    h_6 as enth_mol (description:"Molar enthalpy of anode liquid stream", spec:Free);
+
+//Equation Declaration
+
+    //Voltage division between cathode, anode, and ohmic losses
+    Eqn_V_ohmic: V_ohmic = -ohmic1*j_total^(ohmic2 + 1) / 1000;
+    Eqn_V_cell: V_cell = E_cathode - E_anode + V_nernstian + V_ohmic;
+
+    //Electrokinetics
+    Eqn_eta_c: eta_c = E_td - E_cathode;
+    Eqn_eta_OER: eta_OER = E_anode - E_td_OER;
+    Eqn_j_partial: j_partial = ((CCO2_surf /CCO2_ref)^a) * j_exchange * exp(alpha*eta_c*Faraday/(R*(T+273))); 
+    Eqn_OER: j_total = j_exchange_OER * exp(alpha_OER*eta_OER*Faraday/(R*(T+273)));
+    Eqn_j_total: j_total = sigma(j_partial);
+    Eqn_FE: FE = j_partial / j_total;
+
+    //Calculate CO2 concentration at the inlet and outlet
+    Eqn_Lc: Lc = 2*wc*ec/(wc+ec);
+    Eqn_z_cat_av: z_cat_av = (cathode_in.z + z_2) / 2;
+    Eqn_dens_av: call(dens_av) = pDens_Mol_Vap(T, P_cathode, z_cat_av) ComponentList;
+    Eqn_DiffusiFeed: call(DiffusiFeed) = pDiffus_vap(T,P_cathode,z_cat_av) ComponentList;
+    Eqn_CCO2_bulk: CCO2_bulk = z_cat_av(compCO2) * dens_av;
+
+    //Calculate mass transport losses (Aspen diffusivity units are in cm2/s)
+    Eqn_kS: Sherwood * theta_channel = kS * Lc * 1E4 / DiffusiFeed(CompCO2);
+    Eqn_kE: kE = (epsilon_e^1.5) * DiffusiFeed(CompCO2) / (thick_e * 1E4);
+    Eqn_kNet: 1 / kNet = 1 / kS + 1 / kE;
+    Eqn_CCO2_surf: kNet * (CCO2_bulk - CCO2_surf) = CO2_converted + CO2_crossover; 
+    
+    //Species conservation for CO2
+    Eqn_tau_CO2: tau_CO2 = carb1 + carb2*j_total;
+    Eqn_CO2_crossover: CO2_crossover = tau_CO2 * j_total * 1E-8;
+    Eqn_CO2_converted: CO2_converted = sigma(a*j_partial/b)/(100*Faraday);
+    Eqn_CO2_cathode: cathode_in.z(compCO2) * cathode_in.F / (3600*A_geometric) = N_2(compCO2) + CO2_converted + CO2_crossover;
+    N_3(compCO2): 0, Fixed;     //No CO2 dissolves in the cathode liquid stream
+    Eqn_CO2_anode: N_5(compCO2) = anode_in.F * anode_in.z(compCO2) / (3600*A_geometric) + CO2_crossover;
+    N_6(compCO2): 0, Fixed;     //No CO2 dissolves in the anode liquid stream
+
+    //Species conservation for H2O (liquid)
+    Eqn_H2O_consumed: H2O_consumed = sigma(c*j_partial/b)/(100*Faraday);
+    Eqn_H2O_crossover: H2O_crossover = theta_water * H2O_consumed;
+    Eqn_H2O_produced: H2O_produced = j_total/(2*100*Faraday);
+    Eqn_H2O_cathode_liq: cathode_in.z(compH2O) * cathode_in.F / (3600*A_geometric) + H2O_crossover = H2O_consumed + N_2(compH2O) + N_3(compH2O);
+    Eqn_H2O_anode_liq: anode_in.z(compH2O) * anode_in.F / (3600*A_geometric) + H2O_produced = H2O_crossover + N_5(compH2O) + N_6(compH2O);
+
+    //Molar ratio calculations for H2O (vapour)
+    Eqn_P_vapour: call(P_vapour) = pVap_Pressures(T) ComponentList;
+    Eqn_H2O_cathode_vap: N_2(compH2O) = P_vapour(CompH2O) / P_cathode * humidity * Flux_2;
+    Eqn_H2O_anode: N_5(compH2O) = P_vapour(CompH2O) / P_anode * humidity * Flux_5;
+
+    //Species conservation for O2
+    N_2(compO2): 0, Fixed;
+    N_3(compO2): 0, Fixed;
+    Eqn_O2_anode: N_5(compO2) = anode_in.F * anode_in.z(compO2) / (3600*A_geometric) + j_total/(100*4*Faraday);
+    N_6(compO2): 0, Fixed;      //No O2 dissolves in the anode liquid stream
+
+    //Species conservation for gas products
+    for catprod in GasProd do
+      Eqn_catprod_balance: N_2(catprod) = cathode_in.z(catprod) * cathode_in.F / (3600*A_geometric) + j_partial(catprod)/(100*b(catprod)*Faraday);
+      N_3(catprod): 0, Fixed;   //No gas products in the cathode liquid stream
+      N_5(catprod): 0, Fixed;   //No gas products in anode gas stream
+      N_6(catprod): 0, Fixed;   //No gas products in anode liquid stream 
+    endfor
+
+    //Species conservation for liquid products
+    for catprod in LiqProd do
+      N_2(catprod): 0, Fixed;   //No liquid products in the cathode gas stream
+      Eqn_catprod_cathode:N_3(catprod) = cathode_in.z(catprod) * cathode_in.F / (3600*A_geometric) + (j_partial(catprod)/(100*b(catprod)*Faraday))*(1 - theta_liquid(catprod));
+      N_5(catprod): 0, Fixed;   //No liquid products in the anode gas stream
+      Eqn_catprod_anode: N_6(catprod) = anode_in.F * anode_in.z(catprod) / (3600*A_geometric) + (j_partial(catprod)/(100*b(catprod)*Faraday))*theta_liquid(catprod);      
+    endfor
+
+    //Species conservation for  inert species (assumed to be all gas phase impurities for cathode and liquid phase impurities for anode)
+    for inert in (ComponentList - compCO2 - compH2O - compO2 - GasProd - LiqProd) do
+      Eqn_inert_cathode: cathode_in.z(inert) * cathode_in.F / (3600*A_geometric) = N_2(inert);
+      N_3(inert): 0, Fixed;
+      N_5(inert): 0, Fixed;
+      Eqn_inert_anode: anode_in.z(inert) * anode_in.F / (3600*A_geometric) = N_6(inert);
+    endfor
+        
+    //Calculation of molar fractions at cathode and anode outlets
+    Eqn_flux_2: Flux_2 = sigma(N_2);
+    Eqn_flux_3: Flux_3 = sigma(N_3);
+    Eqn_flux_5: Flux_5 = sigma(N_5);
+    Eqn_flux_6: Flux_6 = sigma(N_6);
+    Eqn_z_2: z_2 = N_2/Flux_2;
+    Eqn_z_3: z_3 = N_3/Flux_3;
+    Eqn_z_5: z_5 = N_5/Flux_5;
+    Eqn_z_6: z_6 = N_6/Flux_6;
+
+    //Thermodynamic calculations for gas and liquid phase components
+    for species in (GasProd+CompCO2+CompO2) do
+      Eqn_Gibbs_mol_vap: Call (gInterest(species)) = pGibbs_Mol_Vap (T, P_cathode, pure(species)) ComponentList;
+      Eqn_Enth_mol_vap: Call (hInterest(species)) = pEnth_Mol_Vap (T, P_cathode, pure(species)) ComponentList;
+    endfor
+
+    for species in (LiqProd+CompH2O) do
+      Eqn_Gibbs_mol_liq: Call (gInterest(species)) = pGibbs_Mol_Liq (T, P_cathode, pure(species)) ComponentList;
+      Eqn_Enth_mol_liq: Call (hInterest(species)) = pEnth_Mol_Liq (T, P_cathode, pure(species)) ComponentList;
+    endfor
+
+    //Half-cell thermodynamic voltage and full-cell thermoneutral voltage calculations
+    for catprod in (GasProd+LiqProd) do
+      Eqn_E_td: -E_td(catprod) * b(catprod) * Faraday * 1E-6 = gInterest(catprod) + (b(catprod)-c(catprod))*gInterest(compH2O) - a(catprod)*gInterest(compCO2);
+      Eqn_E_tn: -E_tn(catprod) * b(catprod) * Faraday * 1E-6 = hInterest(catprod) + b(catprod)*hInterest(compO2)/4 - a(catprod)*hInterest(compCO2) - (c(catprod)-b(catprod)/2)*hInterest(compH2O);
+    endfor
+    Eqn_E_td_OER: E_td_OER * 4 * Faraday * 1E-6 = gInterest(compO2) - 2*gInterest(compH2O);
+    Eqn_E_tn_cell: E_tn_cell = sigma(FE*E_tn);
+    Eqn_Q_cell: Q_cell = A_geometric*j_total*(E_tn_cell-V_Cell)*1E-2;
+    Eqn_electricity: Electricity = -A_geometric*j_total*V_cell*1E-2;
+
+//Port calculations - cathode outlet port
+    cathode_out.T = T;
+    cathode_out.P = P_cathode;
+    cathode_out.F = (Flux_2 + Flux_3) * A_geometric * 3600;
+    Eqn_cathode_out_z: cathode_out.z * (Flux_2 + Flux_3) = z_2 * Flux_2 + z_3 * Flux_3;
+
+    call(h_2) = pEnth_Mol_Vap (T, P_cathode, z_2) ComponentList;
+    call(h_3) = pEnth_Mol_Liq (T, P_cathode, z_3) ComponentList;
+    Eqn_cathode_out_h: cathode_out.h * (Flux_2 + Flux_3) = h_2 * Flux_2 + h_3 * Flux_3;
+
+    call(dens_2) = pDens_Mol_Vap (T, P_cathode, z_2) ComponentList;
+    call(dens_3) = pDens_Mol_Liq (T, P_cathode, z_3) ComponentList;
+    Eqn_cathode_out_v: cathode_out.v * (Flux_2 + Flux_3)= Flux_2 / dens_2 + Flux_3 / dens_3;
+
+//Port calculations - anode outlet port
+    anode_out.T = T;
+    anode_out.P = P_anode;
+    anode_out.F = (Flux_5 + Flux_6) * A_geometric * 3600;
+    Eqn_anode_out_z: anode_out.z * (Flux_5 + Flux_6) = z_5 * Flux_5 + z_6 * Flux_6;
+
+    call(h_5) = pEnth_Mol_Vap (T, P_anode, z_5) ComponentList;
+    call(h_6) = pEnth_Mol_Liq (T, P_anode, z_6) ComponentList;
+    Eqn_anode_out_h: anode_out.h * (Flux_5 + Flux_6) = h_5 * Flux_5 + h_6 * Flux_6;
+
+    call(dens_5) = pDens_Mol_Vap (T, P_anode, z_5) ComponentList;
+    call(dens_6) = pDens_Mol_Liq (T, P_anode, z_6) ComponentList;
+    Eqn_anode_out_v: anode_out.v * (Flux_5 + Flux_6) = Flux_5 / dens_5 + Flux_6 / dens_6;
+
+End
